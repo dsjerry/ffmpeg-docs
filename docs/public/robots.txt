@@ -1,0 +1,15 @@
+# https://ffmpeg-docs.vercel.app/robots.txt
+# Allow all crawlers to access the site
+
+User-agent: *
+Allow: /
+
+# Sitemap
+Sitemap: https://ffmpeg-docs.vercel.app/sitemap.xml
+
+# Crawl-delay (optional, polite crawl frequency)
+Crawl-delay: 1
+
+# Block common bot traps and admin areas (if any exist)
+Disallow: /admin/
+Disallow: /api/
