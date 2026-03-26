@@ -11,5 +11,10 @@
   "devDependencies": {
     "vitepress": "^1.6.3",
     "vue": "^3.5.13"
+  },
+  "dependencies": {
+    "@ffmpeg/core": "^0.12.10",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2"
   }
 }
