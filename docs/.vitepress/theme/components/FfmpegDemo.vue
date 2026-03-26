@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
 import { useData } from 'vitepress'
+import coreURL from '@ffmpeg/core?url'
+import wasmURL from '@ffmpeg/core/wasm?url'
 
 const { lang } = useData()
 const ffmpegRef = ref<any>(null)
@@ -14,6 +16,7 @@ const selectedPreset = ref('gif')
 const customArgs = ref('')
 const errorMsg = ref('')
 const isDragging = ref(false)
+const converting = ref(false)
 
 const isZh = computed(() => lang.value === 'zh-CN')
 
@@ -37,6 +40,12 @@ const presets = computed(() => [
     description: isZh.value ? 'VP9 编码，Web 友好' : 'VP9 codec, web-friendly'
   },
   {
+    id: 'resize',
+    label: isZh.value ? '图片压缩' : 'Compress Image',
+    args: ['-i', 'input.jpg', '-vf', 'scale=1200:-1', '-q:v', '80', 'output.jpg'],
+    description: isZh.value ? '调整大小并压缩 JPG/PNG' : 'Resize and compress JPG/PNG'
+  },
+  {
     id: 'clip',
     label: isZh.value ? '裁剪片段' : 'Trim Clip',
     args: ['-i', 'input.mp4', '-ss', '00:00:05', '-t', '10', '-c:v', 'libx264', '-crf', '22', '-c:a', 'aac', 'clip.mp4'],
@@ -52,14 +61,17 @@ const presets = computed(() => [
 
 const selectedPresetData = computed(() => presets.value.find(p => p.id === selectedPreset.value) || presets.value[0])
 
+let loadStarted = false
+
 const load = async () => {
-  if (loaded.value) return
+  if (loaded.value || loadStarted) return
+  loadStarted = true
   loading.value = true
   logLines.value = []
   try {
-    const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd'
     const { FFmpeg } = await import('@ffmpeg/ffmpeg')
-    const { toBlobURL } = await import('@ffmpeg/util')
+
+    logLines.value.push(isZh.value ? '开始加载 FFmpeg 引擎...' : 'Loading FFmpeg engine...')
 
     const ffmpeg = new FFmpeg()
     ffmpegRef.value = ffmpeg
@@ -73,16 +85,20 @@ const load = async () => {
       progress.value = Math.round(p * 100)
     })
 
-    await ffmpeg.load({
-      coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-      wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm')
-    })
+    logLines.value.push(isZh.value ? '正在加载 WASM 文件...' : 'Loading WASM files...')
+
+    const loadPromise = ffmpeg.load({ coreURL, wasmURL })
+    const timeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('WASM load timeout (>60s). Check COOP/COEP headers or network.')), 60000)
+    )
+
+    await Promise.race([loadPromise, timeout])
 
     loaded.value = true
-    logLines.value.push(loaded.value
-      ? (isZh.value ? 'FFmpeg WASM 加载成功！' : 'FFmpeg WASM loaded successfully!')
-      : 'FFmpeg WASM loaded successfully!')
+    loadStarted = false
+    logLines.value.push(isZh.value ? 'FFmpeg WASM 加载成功！' : 'FFmpeg WASM loaded successfully!')
   } catch (e: any) {
+    loadStarted = false
     logLines.value.push(`Error: ${e.message}`)
     errorMsg.value = e.message
   } finally {
@@ -100,6 +116,7 @@ const run = async () => {
   outputUrl.value = null
   progress.value = 0
   logLines.value = []
+  converting.value = true
 
   try {
     const ffmpeg = ffmpegRef.value
@@ -110,27 +127,38 @@ const run = async () => {
 
     if (!loaded.value) await load()
 
-    const inputName = 'input.mp4'
+    const ext = inputFile.value!.name.split('.').pop() || 'mp4'
+    const inputName = `input.${ext}`
+    // 动态替换 args 中的输入文件名（如 input.mp4 → input.png）
+    const resolvedArgs = args.map((arg: string) => arg.replace(/^input\.\w+$/, inputName))
+    logLines.value.push(`[1] Writing input file (${(inputFile.value!.size / 1024 / 1024).toFixed(2)} MB)...`)
     await ffmpeg.writeFile(inputName, await fetchFile(inputFile.value))
+    logLines.value.push('[2] File written, starting ffmpeg.exec()...')
 
-    await ffmpeg.exec(args)
+    await ffmpeg.exec(resolvedArgs)
+    logLines.value.push('[3] ffmpeg.exec() finished, reading output...')
 
-    const outputExt = selectedPreset.value === 'gif' ? 'gif'
-      : selectedPreset.value === 'webm' ? 'webm'
-      : selectedPreset.value === 'clip' ? 'mp4'
+    const outputExt = selectedPreset.value === 'gif' ? 'output.gif'
+      : selectedPreset.value === 'webm' ? 'output.webm'
+      : selectedPreset.value === 'clip' ? 'clip.mp4'
+      : selectedPreset.value === 'resize' ? 'output.jpg'
       : 'output.mp4'
 
     const data = await ffmpeg.readFile(outputExt)
-    const mime = outputExt === 'gif' ? 'image/gif'
-      : outputExt === 'webm' ? 'video/webm'
+    const mime = selectedPreset.value === 'gif' ? 'image/gif'
+      : selectedPreset.value === 'resize' ? 'image/jpeg'
+      : selectedPreset.value === 'webm' ? 'video/webm'
       : 'video/mp4'
 
     outputUrl.value = URL.createObjectURL(new Blob([data.buffer], { type: mime }))
+    logLines.value.push(`[4] Done! Output size: ${(data.byteLength / 1024 / 1024).toFixed(2)} MB`)
 
     logLines.value.push(isZh.value ? '转换完成！' : 'Conversion complete!')
   } catch (e: any) {
     logLines.value.push(`Error: ${e.message}`)
     errorMsg.value = e.message
+  } finally {
+    converting.value = false
   }
 }
 
@@ -176,9 +204,9 @@ onMounted(() => {
         @dragover.prevent="isDragging = true"
         @dragleave="isDragging = false"
         @drop.prevent="handleDrop">
-        <input type="file" accept="video/*" @change="handleFile" id="ffmpeg-file-input" />
+        <input type="file" accept="video/*,image/jpeg,image/png,image/webp" @change="handleFile" id="ffmpeg-file-input" />
         <label for="ffmpeg-file-input" class="file-label">
-          <span v-if="!inputFile">{{ isZh ? '选择视频文件或拖拽到此处' : 'Select a video file or drag & drop here' }}</span>
+          <span v-if="!inputFile">{{ isZh ? '选择视频或图片文件' : 'Select video or image file' }}</span>
           <span v-else class="file-name">{{ inputFile.name }}</span>
         </label>
       </div>
@@ -211,8 +239,8 @@ onMounted(() => {
       </div>
 
       <!-- Run Button -->
-      <button class="btn-primary btn-run" @click="run" :disabled="!inputFile || !loaded">
-        {{ isZh ? '运行转换' : 'Run Conversion' }}
+      <button class="btn-primary btn-run" @click="run" :disabled="!inputFile || !loaded || converting">
+        {{ converting ? (isZh ? '转换中...' : 'Converting...') : (isZh ? '运行转换' : 'Run Conversion') }}
       </button>
 
       <!-- Progress -->
@@ -224,8 +252,8 @@ onMounted(() => {
       <!-- Output -->
       <div v-if="outputUrl" class="output-section">
         <h4>{{ isZh ? '输出预览' : 'Output Preview' }}</h4>
-        <video v-if="selectedPreset !== 'gif'" :src="outputUrl" controls class="output-video" />
-        <img v-else :src="outputUrl" class="output-gif" alt="output" />
+        <img v-if="selectedPreset === 'gif' || selectedPreset === 'resize'" :src="outputUrl" class="output-gif" alt="output" />
+        <video v-else :src="outputUrl" controls class="output-video" />
         <a :href="outputUrl" :download="selectedPreset + '-output'" class="btn-download">
           {{ isZh ? '下载结果' : 'Download Result' }}
         </a>
